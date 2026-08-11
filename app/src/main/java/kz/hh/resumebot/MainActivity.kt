@@ -294,32 +294,42 @@ class MainActivity : Activity() {
     /** Поднимает ВСЕ доступные резюме на странице — по одному за раз. */
     private fun runRaise() {
         status("Ищу кнопки «Поднять в поиске»…")
-        RaiseDriver.runChain(webView) { total ->
-            if (total > 0) {
-                status("✅ Готово! Поднято резюме: $total")
-                Prefs.setLastRaiseOk(this@MainActivity)
-                Prefs.addLog(this@MainActivity, "приложение", "поднято резюме: $total")
-                Notifier.notify(
-                    this@MainActivity,
-                    "✅ HH: поднято резюме: $total",
-                    "Все доступные резюме подняты в поиске",
-                    openApp = false
-                )
-                handler.postDelayed({
-                    try { webView.reload() } catch (_: Throwable) { }
-                }, 1500)
-            } else {
-                status(
-                    "⚠️ Кнопка «Поднять» не найдена. Если ниже форма входа — войдите. " +
-                        "Если всё поднято — лимит 4 часа, подождите."
-                )
-                Prefs.addLog(this@MainActivity, "приложение", "кнопок нет (лимит 4 ч или вход)")
-                Notifier.notify(
-                    this@MainActivity,
-                    "HH: нечего поднимать",
-                    "Кнопка не найдена: нужен вход или лимит 4 часов",
-                    openApp = true
-                )
+        RaiseDriver.runChain(webView) { total, locked ->
+            when {
+                total > 0 -> {
+                    status("✅ Готово! Поднято резюме: $total")
+                    Prefs.setLastRaiseOk(this@MainActivity)
+                    Prefs.addLog(this@MainActivity, "приложение", "поднято резюме: $total")
+                    Notifier.notify(
+                        this@MainActivity,
+                        "✅ HH: поднято резюме: $total",
+                        "Все доступные резюме подняты в поиске",
+                        openApp = false
+                    )
+                    handler.postDelayed({
+                        try { webView.reload() } catch (_: Throwable) { }
+                    }, 1500)
+                }
+                locked > 0 -> {
+                    status("✅ Все резюме уже подняты. Следующее поднятие будет доступно позже (лимит 4 ч).")
+                    Prefs.addLog(
+                        this@MainActivity, "приложение",
+                        "все уже подняты (кнопок-замков: $locked)"
+                    )
+                }
+                else -> {
+                    status(
+                        "⚠️ Кнопка «Поднять» не найдена. Если ниже форма входа — войдите. " +
+                            "Если всё поднято — лимит 4 часа, подождите."
+                    )
+                    Prefs.addLog(this@MainActivity, "приложение", "кнопок нет (лимит 4 ч или вход)")
+                    Notifier.notify(
+                        this@MainActivity,
+                        "HH: нечего поднимать",
+                        "Кнопка не найдена: нужен вход или лимит 4 часов",
+                        openApp = true
+                    )
+                }
             }
             refreshLog()
         }

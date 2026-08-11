@@ -3,8 +3,19 @@ package kz.hh.resumebot
 import android.webkit.WebView
 import org.json.JSONObject
 
-/** Результат выполнения JS-клика на странице hh. */
-data class RaiseResult(val found: Int, val clicked: Int, val texts: String)
+/**
+ * Результат выполнения JS на странице hh.
+ * found   — сколько активных кнопок «Поднять» найдено
+ * clicked — сколько нажато (0 или 1, кликаем по одной)
+ * texts   — текст нажатой кнопки
+ * locked  — сколько кнопок-«замков» вида «Поднять в 18:49» (ещё недоступны)
+ */
+data class RaiseResult(
+    val found: Int,
+    val clicked: Int,
+    val texts: String,
+    val locked: Int = 0
+)
 
 /**
  * JavaScript, который ищет на странице кнопку «Поднять в поиске» /
@@ -12,15 +23,12 @@ data class RaiseResult(val found: Int, val clicked: Int, val texts: String)
  *
  * Сознательно ищем по ТЕКСТУ кнопки, а не по CSS-классам:
  * hh часто меняет вёрстку, а текст кнопки стабилен.
- * Платные услуги («Продвижение», «Увеличить просмотры») отфильтровываем.
+ * «Поднять в 18:49» (кнопка-замок до нужного времени) пропускаем.
+ * Платные услуги («Продвижение», «Увеличить просмотры») не трогаем.
  */
 object JsRaiser {
 
-    /**
-     * Кликает ПЕРВУЮ подходящую кнопку. Возвращает "F:<found>;C:<clicked>;T:<text>".
-     * По одному за раз — потому что после каждого клика hh перерисовывает
-     * карточку, и старые ссылки на элементы протухают.
-     */
+    /** Кликает ПЕРВУЮ доступную кнопку. Возвращает "F:..;C:..;L:..;T:..". */
     val CLICK_ONE_JS: String = """
 (function(){
   function vis(el){
@@ -28,15 +36,26 @@ object JsRaiser {
     var s = window.getComputedStyle(el);
     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
   }
+  function txt(el){
+    return ((el.innerText||'')+' '+(el.getAttribute('title')||'')+' '+(el.getAttribute('aria-label')||''))
+             .toLowerCase().replace(/\s+/g,' ').trim();
+  }
   var BAN = ['продвижени','продвинуть','увеличить просмотры','реклам'];
+  var LOCK = /поднять в \d{1,2}[:.]\d{2}/;
   var els = Array.prototype.slice.call(
     document.querySelectorAll('button, a, [role="button"], span')
   );
+  // Кнопки-«замки» («Поднять в 18:49») — считаем, но не трогаем
+  var lockEls = els.filter(function(el){ return vis(el) && LOCK.test(txt(el)); });
+  var locked = lockEls.filter(function(el){
+    return !lockEls.some(function(o){ return o !== el && el.contains(o); });
+  }).length;
+
   var cand = els.filter(function(el){
     if (!vis(el)) return false;
-    var t = ((el.innerText||'')+' '+(el.getAttribute('title')||'')+' '+(el.getAttribute('aria-label')||''))
-              .toLowerCase().replace(/\s+/g,' ').trim();
+    var t = txt(el);
     if (!t || t.length > 40) return false;
+    if (LOCK.test(t)) return false;
     if (t.indexOf('поднять') < 0 && t.indexOf('обновить дату') < 0) return false;
     for (var i = 0; i < BAN.length; i++) { if (t.indexOf(BAN[i]) >= 0) return false; }
     var h = el.getAttribute('href') || '';
@@ -47,11 +66,11 @@ object JsRaiser {
   var inner = cand.filter(function(el){
     return !cand.some(function(o){ return o !== el && el.contains(o); });
   });
-  if (!inner.length) return 'F:0;C:0;T:';
+  if (!inner.length) return 'F:0;C:0;L:' + locked + ';T:';
   var el = inner[0];
   var t = (el.innerText||'').trim().slice(0,25);
-  try { el.click(); return 'F:' + inner.length + ';C:1;T:' + t; }
-  catch(e){ return 'F:' + inner.length + ';C:0;T:err'; }
+  try { el.click(); return 'F:' + inner.length + ';C:1;L:' + locked + ';T:' + t; }
+  catch(e){ return 'F:' + inner.length + ';C:0;L:' + locked + ';T:err'; }
 })()
 """.trimIndent()
 
@@ -81,10 +100,10 @@ object JsRaiser {
 
     /**
      * evaluateJavascript возвращает JSON-строку в кавычках — декодируем её,
-     * затем разбираем протокол "F:..;C:..;T:..".
+     * затем разбираем протокол "F:..;C:..;L:..;T:..".
      */
     fun parse(raw: String?): RaiseResult {
-        if (raw.isNullOrBlank() || raw == "null") return RaiseResult(0, 0, "")
+        if (raw.isNullOrBlank() || raw == "null") return RaiseResult(0, 0, "", 0)
         val decoded = try {
             JSONObject("{\"v\":$raw}").getString("v")
         } catch (e: Exception) {
@@ -92,35 +111,42 @@ object JsRaiser {
         }
         var f = 0
         var c = 0
+        var l = 0
         var t = ""
         for (part in decoded.split(";")) {
             when {
                 part.startsWith("F:") -> f = part.removePrefix("F:").toIntOrNull() ?: 0
                 part.startsWith("C:") -> c = part.removePrefix("C:").toIntOrNull() ?: 0
+                part.startsWith("L:") -> l = part.removePrefix("L:").toIntOrNull() ?: 0
                 part.startsWith("T:") -> t = part.removePrefix("T:")
             }
         }
-        return RaiseResult(f, c, t)
+        return RaiseResult(f, c, t, l)
     }
 }
 
 /**
  * Цепочка поднятия для НЕСКОЛЬКИХ резюме:
  * нажимает одну кнопку → ждёт обновления страницы → заново ищет следующую.
- * Так после каждого клика (когда hh перерисовал список) мы работаем
- * со свежей разметкой.
+ * После каждого клика hh перерисовывает список, поэтому работаем
+ * только со свежей разметкой.
+ * onDone получает (сколько нажато, сколько кнопок ещё «замкнуто» по времени).
  */
 object RaiseDriver {
 
     private const val MAX_STEPS = 12
     private const val STEP_DELAY_MS = 1600L
 
-    /** onDone получает суммарное количество успешных нажатий. */
-    fun runChain(webView: WebView, onDone: (Int) -> Unit) {
+    fun runChain(webView: WebView, onDone: (total: Int, locked: Int) -> Unit) {
         step(webView, MAX_STEPS, 0, onDone)
     }
 
-    private fun step(webView: WebView, stepsLeft: Int, acc: Int, onDone: (Int) -> Unit) {
+    private fun step(
+        webView: WebView,
+        stepsLeft: Int,
+        acc: Int,
+        onDone: (total: Int, locked: Int) -> Unit
+    ) {
         try {
             webView.evaluateJavascript(JsRaiser.CLICK_ONE_JS) { raw ->
                 val r = JsRaiser.parse(raw)
@@ -132,11 +158,11 @@ object RaiseDriver {
                         STEP_DELAY_MS
                     )
                 } else {
-                    onDone(acc + r.clicked)
+                    onDone(acc + r.clicked, r.locked)
                 }
             }
         } catch (_: Throwable) {
-            onDone(acc)
+            onDone(acc, 0)
         }
     }
 }

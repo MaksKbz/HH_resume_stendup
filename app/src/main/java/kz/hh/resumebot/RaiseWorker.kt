@@ -3,6 +3,7 @@ package kz.hh.resumebot
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -20,18 +21,20 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
+/** Итог фонового прогона: сколько поднято + причина, если не вышло. */
+private data class WorkerOutcome(val total: Int, val reason: String)
+
 /**
  * Фоновый воркер.
  *
  * Режим "фон": раз в 4 часа открывает страницу с резюме в скрытом WebView
  * (с сохранённой сессией) и жмёт «Поднять в поиске» для каждого резюме.
  *
- * Режим "тест": то же самое, но каждые 15 минут — для проверки, что фон работает.
+ * Режим "тест": то же самое, но каждые 15 минут — для проверки фона.
  *
- * Каждый запуск пишется в текстовый лог (Prefs.addLog), а время последнего
- * удачного поднятия — в Prefs.lastRaiseOk (нужно для умного старта
- * после перезагрузки телефона). WorkManager сам восстанавливает
- * расписание после перезагрузки.
+ * Каждый запуск пишется в текстовый лог с ТОЧНОЙ причиной неудачи
+ * (таймаут / исключение / редирект на вход / кнопки не найдены) — это
+ * позволяет диагностировать фон без отладчика.
  */
 class RaiseWorker(
     ctx: Context,
@@ -44,6 +47,8 @@ class RaiseWorker(
         val source = inputData.getString(KEY_SOURCE) ?: "фон"
         val isTest = source == "тест"
 
+        Prefs.addLog(appCtx, source, "запуск воркера")
+
         // Есть ли вообще сохранённая сессия
         val cookies = try {
             CookieManager.getInstance().getCookie(url)
@@ -51,7 +56,7 @@ class RaiseWorker(
             null
         }
         if (cookies.isNullOrBlank()) {
-            Prefs.addLog(appCtx, source, "нет сессии — нужен вход в приложении")
+            Prefs.addLog(appCtx, source, "не поднято: нет сессии (нужен вход в приложении)")
             Notifier.notify(
                 appCtx,
                 "HH: нужен вход",
@@ -61,37 +66,37 @@ class RaiseWorker(
             return Result.success()
         }
 
-        val total = try {
+        val outcome = try {
             withContext(Dispatchers.Main) { raiseViaHiddenWebView(url) }
         } catch (t: Throwable) {
-            -1
+            WorkerOutcome(-1, "исключение: ${t.javaClass.simpleName}")
         }
 
-        val note = when {
-            total > 0 -> "поднято резюме: $total"
-            total == 0 -> "кнопок нет (лимит 4 ч или нужен вход)"
-            else -> "ошибка выполнения"
+        val note = if (outcome.total > 0) {
+            "поднято резюме: ${outcome.total}"
+        } else {
+            "не поднято: ${outcome.reason}"
         }
         Prefs.addLog(appCtx, source, note)
-        if (total > 0) Prefs.setLastRaiseOk(appCtx)
+        if (outcome.total > 0) Prefs.setLastRaiseOk(appCtx)
 
         when {
             isTest -> Notifier.notify(
                 appCtx,
-                "🔔 HH: тест фона сработал",
-                "Результат: $note",
-                openApp = false
+                if (outcome.total > 0) "🔔 HH: тест фона — УСПЕХ" else "🔔 HH: тест фона",
+                note,
+                openApp = outcome.total <= 0
             )
-            total > 0 -> Notifier.notify(
+            outcome.total > 0 -> Notifier.notify(
                 appCtx,
-                "✅ HH: поднято резюме: $total",
+                "✅ HH: поднято резюме: ${outcome.total}",
                 "Автоподнятие прошло успешно",
                 openApp = false
             )
             else -> Notifier.notify(
                 appCtx,
                 "HH: не удалось поднять",
-                "Нажмите, чтобы открыть приложение — оно поднимет резюме",
+                "$note. Нажмите, чтобы открыть приложение",
                 openApp = true
             )
         }
@@ -99,38 +104,64 @@ class RaiseWorker(
     }
 
     /**
-     * Грузит страницу в WebView без окна (WebView требует главный поток —
-     * поэтому doWork переключается на Dispatchers.Main, а здесь ждём
-     * результат через корутину, не блокируя поток).
+     * Грузит страницу в WebView без окна.
+     *
+     * Важные детали для фона на любых прошивках:
+     *  - задаём WebView НЕНУЛЕВОЙ размер (иначе hh не отрисовывает кнопки:
+     *    layout/rвnder не идёт при 0x0, и переходы «повисают»);
+     *  - программный рендер (нет GPU-окна в фоне);
+     *  - onResume/resumeTimers.
+     *
+     * Причина каждой неудачи попадает в WorkerOutcome.reason → в лог.
      */
-    private suspend fun raiseViaHiddenWebView(url: String): Int =
+    private suspend fun raiseViaHiddenWebView(url: String): WorkerOutcome =
         suspendCancellableCoroutine { cont ->
             val handler = Handler(Looper.getMainLooper())
             var wv: WebView? = null
 
-            fun finish(total: Int) {
+            fun finish(o: WorkerOutcome) {
                 handler.removeCallbacksAndMessages(null)
                 try { wv?.destroy() } catch (_: Throwable) { }
-                if (cont.isActive) cont.resume(total)
+                if (cont.isActive) cont.resume(o)
             }
 
             try {
                 val view = WebView(applicationContext)
                 wv = view
+
+                try { view.setLayerType(View.LAYER_TYPE_SOFTWARE, null) } catch (_: Throwable) { }
                 view.settings.javaScriptEnabled = true
                 view.settings.domStorageEnabled = true
+                try { view.resumeTimers() } catch (_: Throwable) { }
+                try { view.onResume() } catch (_: Throwable) { }
+
+                // Фиктивные «экранные» размеры, чтобы SPA отрисовал контент
+                val w = 1080
+                val h = 1920
+                view.measure(
+                    View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY)
+                )
+                view.layout(0, 0, w, h)
 
                 view.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(v: WebView, u: String) {
                         when {
-                            // Сначала проверяем логин: backUrl-параметр может
-                            // содержать "/applicant/", так что порядок важен
+                            // Сначала логин: backUrl-параметр может содержать
+                            // "/applicant/", поэтому порядок проверок важен
                             u.contains("login") || u.contains("account") ->
-                                finish(0)
+                                finish(WorkerOutcome(0, "редирект на страницу входа"))
 
                             u.contains("/applicant/") -> v.postDelayed({
-                                RaiseDriver.runChain(v) { total ->
-                                    v.postDelayed({ finish(total) }, 1000)
+                                RaiseDriver.runChain(v) { total, locked ->
+                                    val reason = if (locked > 0) {
+                                        "уже подняты, след. окно позже (замков: $locked)"
+                                    } else {
+                                        "кнопки не найдены на странице"
+                                    }
+                                    v.postDelayed({
+                                        finish(WorkerOutcome(total, if (total > 0) "ок" else reason))
+                                    }, 1000)
                                 }
                             }, 2500)
                         }
@@ -138,11 +169,14 @@ class RaiseWorker(
                 }
                 view.loadUrl(url)
             } catch (t: Throwable) {
-                finish(-1)
+                finish(WorkerOutcome(-1, "исключение: ${t.javaClass.simpleName}: ${t.message}"))
             }
 
             // Страховой таймаут, чтобы воркер не висел вечно
-            handler.postDelayed({ finish(-1) }, 80_000)
+            handler.postDelayed(
+                { finish(WorkerOutcome(-1, "таймаут 80с: страница не прогрузилась в фоне")) },
+                80_000
+            )
         }
 
     companion object {
