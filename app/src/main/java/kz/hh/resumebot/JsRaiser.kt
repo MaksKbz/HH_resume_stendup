@@ -99,16 +99,94 @@ object JsRaiser {
 """.trimIndent()
 
     /**
-     * evaluateJavascript возвращает JSON-строку в кавычках — декодируем её,
-     * затем разбираем протокол "F:..;C:..;L:..;T:..".
+     * Сниффер запросов: оборачивает fetch / XMLHttpRequest и записывает
+     * все обращения в window.__reqs. Инжектим на странице ЛИЧНОГО КАБИНЕТА
+     * до нажатий кнопок — так после ручного поднятия мы знаем точный
+     * запрос hh («рецепт») и можем повторять его в фоне без браузера.
      */
-    fun parse(raw: String?): RaiseResult {
-        if (raw.isNullOrBlank() || raw == "null") return RaiseResult(0, 0, "", 0)
-        val decoded = try {
+    val CAPTURE_JS: String = """
+(function(){
+  if (window.__cap) return 'already';
+  window.__cap = 1;
+  window.__reqs = [];
+  function safeBody(b){
+    try {
+      if (typeof b === 'string') return b;
+      if (b instanceof URLSearchParams) return b.toString();
+      if (b instanceof FormData) {
+        var r = [];
+        b.forEach(function(v,k){ r.push(k + '=' + (typeof v === 'string' ? v : '[file]')); });
+        return r.join('&');
+      }
+      return String(b);
+    } catch(e){ return null; }
+  }
+  function hdrs(h){
+    try {
+      if (!h) return null;
+      if (h instanceof Headers) { var o = {}; h.forEach(function(v,k){ o[k]=v; }); return JSON.stringify(o); }
+      return JSON.stringify(h);
+    } catch(e){ return null; }
+  }
+  function rec(o){ try { window.__reqs.push(o); if (window.__reqs.length > 80) window.__reqs.shift(); } catch(e){} }
+  try {
+    var of = window.fetch;
+    window.fetch = function(){
+      var a = arguments;
+      try {
+        var init = a[1] || {};
+        rec({ t:'f', m:(init.method || 'GET'),
+              u: String(a[0] && a[0].url ? a[0].url : a[0]),
+              b: (init.body != null ? safeBody(init.body) : null),
+              h: hdrs(init.headers) });
+      } catch(e){}
+      return of.apply(this, a);
+    };
+  } catch(e){}
+  try {
+    var OO = XMLHttpRequest.prototype.open;
+    var OH = XMLHttpRequest.prototype.setRequestHeader;
+    var OS = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(m,u){
+      this.__m = m; this.__u = String(u); this.__h = {};
+      return OO.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.setRequestHeader = function(k,v){
+      try { this.__h[k] = v; } catch(e){}
+      return OH.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function(b){
+      try { rec({ t:'x', m:this.__m || 'GET', u:this.__u || '',
+                  b:(b != null ? safeBody(b) : null), h: JSON.stringify(this.__h || {}) }); } catch(e){}
+      return OS.apply(this, arguments);
+    };
+  } catch(e){}
+  return 'ok';
+})()
+""".trimIndent()
+
+    /** Прочитать накопленные POST-запросы (рецепт поднятия). */
+    val READ_REQS_JS: String =
+        "(function(){try{var r=(window.__reqs||[]).filter(function(x){return x.m==='POST'});" +
+            "return JSON.stringify(r)}catch(e){return '[]'}})()"
+
+    /** evaluateJavascript возвращает JSON-строку в кавычках — снимаем кавычки/эскейпы. */
+    fun decode(raw: String?): String {
+        if (raw.isNullOrBlank() || raw == "null") return ""
+        return try {
             JSONObject("{\"v\":$raw}").getString("v")
         } catch (e: Exception) {
             raw
         }
+    }
+
+    /**
+     * evaluateJavascript возвращает JSON-строку в кавычках — декодируем её,
+     * затем разбираем протокол "F:..;C:..;L:..;T:..".
+     */
+    fun parse(raw: String?): RaiseResult {
+        val decoded = decode(raw)
+        if (decoded.isBlank()) return RaiseResult(0, 0, "", 0)
         var f = 0
         var c = 0
         var l = 0

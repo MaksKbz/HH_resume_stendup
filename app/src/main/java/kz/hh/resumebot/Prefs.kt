@@ -7,8 +7,8 @@ import java.util.Locale
 
 /**
  * Настройки и данные приложения (SharedPreferences):
- * целевая страница, флаги авто-поднятия и тест-режима,
- * время последнего успешного поднятия и полный текстовый лог.
+ * целевая страница, флаги режимов, время последнего поднятия,
+ * текстовый лог, сохранённый «рецепт» запроса поднятия и User-Agent.
  */
 object Prefs {
 
@@ -19,6 +19,8 @@ object Prefs {
     private const val KEY_TEST = "test_mode"
     private const val KEY_LAST_OK = "last_raise_ok"
     private const val KEY_LOG = "raise_log"
+    private const val KEY_RECIPE = "raise_recipe"
+    private const val KEY_WEB_UA = "web_ua"
 
     private const val MAX_LOG_LINES = 200
 
@@ -60,6 +62,22 @@ object Prefs {
     }
 
     fun lastRaiseOk(ctx: Context): Long = sp(ctx).getLong(KEY_LAST_OK, 0L)
+
+    // ---------- Рецепт запроса поднятия (для фона без браузера) ----------
+
+    fun setRecipe(ctx: Context, json: String) {
+        sp(ctx).edit().putString(KEY_RECIPE, json).apply()
+    }
+
+    fun recipe(ctx: Context): String = sp(ctx).getString(KEY_RECIPE, "") ?: ""
+
+    // ---------- User-Agent встроенного браузера (чтобы реплей выглядел так же) ----------
+
+    fun setWebUa(ctx: Context, ua: String) {
+        if (ua.isNotBlank()) sp(ctx).edit().putString(KEY_WEB_UA, ua).apply()
+    }
+
+    fun webUa(ctx: Context): String = sp(ctx).getString(KEY_WEB_UA, "") ?: ""
 
     // ---------- Текстовый лог (вся история, новые сверху) ----------
 

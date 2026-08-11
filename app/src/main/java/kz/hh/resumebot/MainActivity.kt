@@ -4,10 +4,13 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
+import android.view.View
 import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -40,6 +43,7 @@ class MainActivity : Activity() {
     private lateinit var statusView: TextView
     private lateinit var logText: TextView
     private lateinit var urlEdit: EditText
+    private lateinit var overlayButton: Button
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -71,6 +75,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         refreshLog()
+        updateOverlayButton()
     }
 
     override fun onDestroy() {
@@ -117,6 +122,27 @@ class MainActivity : Activity() {
         row1.addView(btnRaise, weightLp(1f))
         row1.addView(btnLogin, weightLp(1f))
         head.addView(row1)
+
+        // --- Разрешение «поверх приложений» (запасной режим фона) ---
+        overlayButton = Button(this).apply {
+            text = "⚙️ «Поверх приложений» — запасной режим фона"
+            textSize = 11f
+            setOnClickListener {
+                try {
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            Uri.parse("package:$packageName")
+                        )
+                    )
+                } catch (t: Throwable) {
+                    try {
+                        startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION))
+                    } catch (_: Throwable) { }
+                }
+            }
+        }
+        head.addView(overlayButton)
 
         // --- Авто-поднятие ---
         val autoSwitch = Switch(this).apply {
@@ -243,6 +269,14 @@ class MainActivity : Activity() {
 
         setContentView(root)
         refreshLog()
+        updateOverlayButton()
+    }
+
+    /** Кнопка разрешения видна, только пока разрешение не выдано. */
+    private fun updateOverlayButton() {
+        if (!::overlayButton.isInitialized) return
+        val need = !OverlayRunner.overlaysAllowed(this)
+        overlayButton.visibility = if (need) View.VISIBLE else View.GONE
     }
 
     private fun setupWebView() {
@@ -253,13 +287,22 @@ class MainActivity : Activity() {
         webView.settings.javaScriptEnabled = true
         webView.settings.domStorageEnabled = true
 
+        // сохраняем UA встроенного браузера — фоновый реплей подписывается так же
+        try { Prefs.setWebUa(this, webView.settings.userAgentString) } catch (_: Throwable) { }
+
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String) {
                 status("Загружено: ${url.take(60)}")
+
+                val isLoginPage = url.contains("login") || url.contains("account")
+                if (url.contains("/applicant/") && !isLoginPage) {
+                    // Вешаем сниффер ДО кликов — так узнаём точный запрос hh
+                    try { view.evaluateJavascript(JsRaiser.CAPTURE_JS, null) } catch (_: Throwable) { }
+                }
+
                 // Кнопки поднятия есть на страницах личного кабинета
                 // (/applicant/profile/me, старый /applicant/resumes и т.п.)
                 // Страницу логина пропускаем: флаг сохранится, кликнем после входа.
-                val isLoginPage = url.contains("login") || url.contains("account")
                 if (autoClickPending && url.contains("/applicant/") && !isLoginPage) {
                     autoClickPending = false
                     view.postDelayed({ runRaise() }, 2000)
@@ -297,9 +340,23 @@ class MainActivity : Activity() {
         RaiseDriver.runChain(webView) { total, locked ->
             when {
                 total > 0 -> {
-                    status("✅ Готово! Поднято резюме: $total")
+                    status("✅ Готово! Поднято резюме: $total. Сохраняю запрос для фона…")
                     Prefs.setLastRaiseOk(this@MainActivity)
                     Prefs.addLog(this@MainActivity, "приложение", "поднято резюме: $total")
+                    // Сохраняем перехваченный запрос — фон сможет поднимать без браузера
+                    try {
+                        webView.evaluateJavascript(JsRaiser.READ_REQS_JS) { raw ->
+                            val arr = JsRaiser.decode(raw)
+                            if (arr.startsWith("[{")) {
+                                Prefs.setRecipe(this@MainActivity, arr)
+                                Prefs.addLog(
+                                    this@MainActivity, "приложение",
+                                    "рецепт запроса сохранён (фон — без браузера)"
+                                )
+                            }
+                            refreshLog()
+                        }
+                    } catch (_: Throwable) { }
                     Notifier.notify(
                         this@MainActivity,
                         "✅ HH: поднято резюме: $total",
