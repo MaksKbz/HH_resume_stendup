@@ -13,6 +13,7 @@ import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import androidx.work.workDataOf
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -20,14 +21,17 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
 /**
- * Фоновый воркер: раз в 4 часа открывает страницу с резюме
- * в скрытом WebView (с сохранённой сессией) и жмёт «Поднять в поиске»
- * для каждого доступного резюме.
+ * Фоновый воркер.
  *
- * WorkManager сам восстанавливает расписание после перезагрузки телефона.
- * Если фоновый клик не удался (сессия истекла, прошивка убила WebView и т.п.),
- * показываем уведомление — одно нажатие открывает приложение,
- * которое поднимет резюме в видимом WebView.
+ * Режим "фон": раз в 4 часа открывает страницу с резюме в скрытом WebView
+ * (с сохранённой сессией) и жмёт «Поднять в поиске» для каждого резюме.
+ *
+ * Режим "тест": то же самое, но каждые 15 минут — для проверки, что фон работает.
+ *
+ * Каждый запуск пишется в текстовый лог (Prefs.addLog), а время последнего
+ * удачного поднятия — в Prefs.lastRaiseOk (нужно для умного старта
+ * после перезагрузки телефона). WorkManager сам восстанавливает
+ * расписание после перезагрузки.
  */
 class RaiseWorker(
     ctx: Context,
@@ -37,6 +41,8 @@ class RaiseWorker(
     override suspend fun doWork(): Result {
         val appCtx = applicationContext
         val url = Prefs.url(appCtx)
+        val source = inputData.getString(KEY_SOURCE) ?: "фон"
+        val isTest = source == "тест"
 
         // Есть ли вообще сохранённая сессия
         val cookies = try {
@@ -45,6 +51,7 @@ class RaiseWorker(
             null
         }
         if (cookies.isNullOrBlank()) {
+            Prefs.addLog(appCtx, source, "нет сессии — нужен вход в приложении")
             Notifier.notify(
                 appCtx,
                 "HH: нужен вход",
@@ -60,23 +67,35 @@ class RaiseWorker(
             -1
         }
 
-        return if (total > 0) {
-            Notifier.notify(
+        val note = when {
+            total > 0 -> "поднято резюме: $total"
+            total == 0 -> "кнопок нет (лимит 4 ч или нужен вход)"
+            else -> "ошибка выполнения"
+        }
+        Prefs.addLog(appCtx, source, note)
+        if (total > 0) Prefs.setLastRaiseOk(appCtx)
+
+        when {
+            isTest -> Notifier.notify(
+                appCtx,
+                "🔔 HH: тест фона сработал",
+                "Результат: $note",
+                openApp = false
+            )
+            total > 0 -> Notifier.notify(
                 appCtx,
                 "✅ HH: поднято резюме: $total",
                 "Автоподнятие прошло успешно",
                 openApp = false
             )
-            Result.success()
-        } else {
-            Notifier.notify(
+            else -> Notifier.notify(
                 appCtx,
                 "HH: не удалось поднять",
                 "Нажмите, чтобы открыть приложение — оно поднимет резюме",
                 openApp = true
             )
-            Result.success()
         }
+        return Result.success()
     }
 
     /**
@@ -128,21 +147,39 @@ class RaiseWorker(
 
     companion object {
         private const val WORK_NAME = "hh_resume_raise"
+        private const val TEST_WORK_NAME = "hh_raise_test"
+        private const val KEY_SOURCE = "source"
 
+        /** Периодическое авто-поднятие каждые 4 часа. */
         fun schedule(ctx: Context) {
             val req = PeriodicWorkRequestBuilder<RaiseWorker>(4, TimeUnit.HOURS)
-                .setConstraints(
-                    Constraints.Builder()
-                        .setRequiredNetworkType(NetworkType.CONNECTED)
-                        .build()
-                )
+                .setInputData(workDataOf(KEY_SOURCE to "фон"))
+                .setConstraints(networkConstraint())
                 .build()
             WorkManager.getInstance(ctx)
                 .enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, req)
         }
 
+        /** Тест-режим: то же самое, но каждые 15 минут (включается тумблером). */
+        fun scheduleTest(ctx: Context) {
+            val req = PeriodicWorkRequestBuilder<RaiseWorker>(15, TimeUnit.MINUTES)
+                .setInputData(workDataOf(KEY_SOURCE to "тест"))
+                .setConstraints(networkConstraint())
+                .build()
+            WorkManager.getInstance(ctx)
+                .enqueueUniquePeriodicWork(TEST_WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, req)
+        }
+
+        fun cancelTest(ctx: Context) {
+            WorkManager.getInstance(ctx).cancelUniqueWork(TEST_WORK_NAME)
+        }
+
         fun cancel(ctx: Context) {
             WorkManager.getInstance(ctx).cancelUniqueWork(WORK_NAME)
         }
+
+        private fun networkConstraint() = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .build()
     }
 }

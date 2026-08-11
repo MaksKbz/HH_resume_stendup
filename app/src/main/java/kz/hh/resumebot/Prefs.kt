@@ -1,10 +1,14 @@
 package kz.hh.resumebot
 
 import android.content.Context
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
- * Настройки приложения (SharedPreferences):
- * целевая страница, флаг авто-поднятия, опциональный Telegram.
+ * Настройки и данные приложения (SharedPreferences):
+ * целевая страница, флаги авто-поднятия и тест-режима,
+ * время последнего успешного поднятия и полный текстовый лог.
  */
 object Prefs {
 
@@ -12,14 +16,20 @@ object Prefs {
 
     private const val KEY_URL = "target_url"
     private const val KEY_AUTO = "auto_enabled"
-    private const val KEY_TG_TOKEN = "tg_token"
-    private const val KEY_TG_CHAT = "tg_chat"
+    private const val KEY_TEST = "test_mode"
+    private const val KEY_LAST_OK = "last_raise_ok"
+    private const val KEY_LOG = "raise_log"
 
-    // Список резюме с кнопками «Поднять в поиске» сейчас живёт на странице профиля
-    const val DEFAULT_URL = "https://hh.kz/applicant/profile/me"
+    private const val MAX_LOG_LINES = 200
+
+    const val URL_KZ = "https://hh.kz/applicant/profile/me"
+    const val URL_RU = "https://hh.ru/applicant/profile/me"
+    const val DEFAULT_URL = URL_KZ
 
     private fun sp(ctx: Context) =
         ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+
+    // ---------- Целевая страница / регион ----------
 
     fun url(ctx: Context): String =
         sp(ctx).getString(KEY_URL, DEFAULT_URL) ?: DEFAULT_URL
@@ -29,21 +39,42 @@ object Prefs {
         if (v.isNotEmpty()) sp(ctx).edit().putString(KEY_URL, v).apply()
     }
 
+    // ---------- Флаги ----------
+
     fun auto(ctx: Context): Boolean = sp(ctx).getBoolean(KEY_AUTO, false)
 
     fun setAuto(ctx: Context, value: Boolean) {
         sp(ctx).edit().putBoolean(KEY_AUTO, value).apply()
     }
 
-    fun tgToken(ctx: Context): String = sp(ctx).getString(KEY_TG_TOKEN, "") ?: ""
+    fun testMode(ctx: Context): Boolean = sp(ctx).getBoolean(KEY_TEST, false)
 
-    fun setTgToken(ctx: Context, value: String) {
-        sp(ctx).edit().putString(KEY_TG_TOKEN, value.trim()).apply()
+    fun setTestMode(ctx: Context, value: Boolean) {
+        sp(ctx).edit().putBoolean(KEY_TEST, value).apply()
     }
 
-    fun tgChat(ctx: Context): String = sp(ctx).getString(KEY_TG_CHAT, "") ?: ""
+    // ---------- Время последнего успешного поднятия ----------
 
-    fun setTgChat(ctx: Context, value: String) {
-        sp(ctx).edit().putString(KEY_TG_CHAT, value.trim()).apply()
+    fun setLastRaiseOk(ctx: Context) {
+        sp(ctx).edit().putLong(KEY_LAST_OK, System.currentTimeMillis()).apply()
+    }
+
+    fun lastRaiseOk(ctx: Context): Long = sp(ctx).getLong(KEY_LAST_OK, 0L)
+
+    // ---------- Текстовый лог (вся история, новые сверху) ----------
+
+    fun addLog(ctx: Context, source: String, result: String) {
+        val time = SimpleDateFormat("dd.MM HH:mm:ss", Locale.getDefault()).format(Date())
+        val entry = "$time  |  $source  |  $result"
+        val old = sp(ctx).getString(KEY_LOG, "") ?: ""
+        val lines = (listOf(entry) + old.split("\n").filter { it.isNotBlank() })
+            .take(MAX_LOG_LINES)
+        sp(ctx).edit().putString(KEY_LOG, lines.joinToString("\n")).apply()
+    }
+
+    fun getLog(ctx: Context): String = sp(ctx).getString(KEY_LOG, "") ?: ""
+
+    fun clearLog(ctx: Context) {
+        sp(ctx).edit().remove(KEY_LOG).apply()
     }
 }
