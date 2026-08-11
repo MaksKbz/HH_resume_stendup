@@ -11,8 +11,19 @@ android {
         applicationId = "kz.hh.resumebot"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
+    }
+
+    // Фиксированный ключ: все сборки подписываются одинаково,
+    // поэтому обновления ставятся поверх без удаления приложения
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     compileOptions {
