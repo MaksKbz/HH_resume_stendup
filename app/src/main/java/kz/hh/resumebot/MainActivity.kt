@@ -18,13 +18,15 @@ import android.widget.Switch
 import android.widget.TextView
 
 /**
- * Главный экран: WebView со страницей «Мои резюме» hh.kz.
+ * Главный экран: WebView со страницей hh, где лежат резюме
+ * (сейчас это /applicant/profile/me, старый /applicant/resumes туда редиректит).
  *
  * Логика:
- *  1. Приложение открылось → сразу грузим страницу с резюме.
- *  2. Если пользователь не залогинен — hh покажет форму входа,
- *     пользователь входит ОДИН РАЗ (сессия сохраняется в WebView).
- *  3. После загрузки страницы резюме автоматически жмём «Поднять».
+ *  1. Приложение открылось → сразу грузим страницу.
+ *  2. Если не залогинены — hh покажет форму входа; входим ОДИН РАЗ
+ *     (сессия сохраняется в WebView).
+ *  3. После загрузки страницы с резюме автоматически жмём «Поднять в поиске»
+ *     для КАЖДОГО доступного резюме (по одному, с перепоиском).
  */
 class MainActivity : Activity() {
 
@@ -34,7 +36,7 @@ class MainActivity : Activity() {
 
     private val handler = Handler(Looper.getMainLooper())
 
-    /** Если true — после загрузки страницы резюме нажать «Поднять». */
+    /** Если true — после загрузки страницы с резюме жать «Поднять». */
     @Volatile
     private var autoClickPending = false
 
@@ -57,7 +59,7 @@ class MainActivity : Activity() {
     }
 
     // ---------------------------------------------------------
-    //  UI (программный, без XML — меньше файлов, проще сборка)
+    //  UI (программный, без XML)
     // ---------------------------------------------------------
 
     private fun buildUi() {
@@ -75,7 +77,6 @@ class MainActivity : Activity() {
         }
         head.addView(statusView)
 
-        // Кнопки управления
         val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val btnRaise = Button(this).apply {
             text = "🔼 Поднять сейчас"
@@ -96,7 +97,6 @@ class MainActivity : Activity() {
         row1.addView(btnLogin, weightLp(1f))
         head.addView(row1)
 
-        // Переключатель авто-режима
         autoSwitch = Switch(this).apply {
             text = "Автоподнятие каждые 4 часа (в фоне)"
             isChecked = Prefs.auto(this@MainActivity)
@@ -118,7 +118,7 @@ class MainActivity : Activity() {
         val etUrl = EditText(this).apply {
             setText(Prefs.url(this@MainActivity))
             textSize = 12f
-            hint = "https://hh.kz/applicant/resumes"
+            hint = Prefs.DEFAULT_URL
         }
         val btnUrl = Button(this).apply {
             text = "OK"
@@ -131,32 +131,6 @@ class MainActivity : Activity() {
         row2.addView(etUrl, weightLp(1f))
         row2.addView(btnUrl)
         head.addView(row2)
-
-        // Telegram (необязательно)
-        val row3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val etToken = EditText(this).apply {
-            setText(Prefs.tgToken(this@MainActivity))
-            hint = "TG_BOT_TOKEN (необяз.)"
-            textSize = 11f
-        }
-        val etChat = EditText(this).apply {
-            setText(Prefs.tgChat(this@MainActivity))
-            hint = "TG_CHAT_ID"
-            textSize = 11f
-        }
-        val btnTg = Button(this).apply {
-            text = "Сохр."
-            textSize = 11f
-            setOnClickListener {
-                Prefs.setTgToken(this@MainActivity, etToken.text.toString())
-                Prefs.setTgChat(this@MainActivity, etChat.text.toString())
-                status("Telegram-настройки сохранены")
-            }
-        }
-        row3.addView(etToken, weightLp(1.4f))
-        row3.addView(etChat, weightLp(1f))
-        row3.addView(btnTg)
-        head.addView(row3)
 
         root.addView(
             head,
@@ -187,11 +161,14 @@ class MainActivity : Activity() {
 
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String) {
-                val short = url.take(60)
-                status("Загружено: $short")
-                if (autoClickPending && url.contains("/applicant/resumes")) {
+                status("Загружено: ${url.take(60)}")
+                // Кнопки поднятия есть на страницах личного кабинета
+                // (/applicant/profile/me, старый /applicant/resumes и т.п.)
+                // Страницу логина пропускаем: флаг сохранится, кликнем после входа.
+                val isLoginPage = url.contains("login") || url.contains("account")
+                if (autoClickPending && url.contains("/applicant/") && !isLoginPage) {
                     autoClickPending = false
-                    view.postDelayed({ runRaise("приложение") }, 2000)
+                    view.postDelayed({ runRaise() }, 2000)
                 }
             }
         }
@@ -209,42 +186,32 @@ class MainActivity : Activity() {
         webView.loadUrl(url)
     }
 
-    /** Нажимает «Поднять» на текущей странице и отчитывается о результате. */
-    private fun runRaise(source: String) {
-        status("Ищу кнопку «Поднять»…")
-        webView.evaluateJavascript(JsRaiser.CLICK_JS) { raw ->
-            val r = JsRaiser.parse(raw)
-            when {
-                r.clicked > 0 -> {
-                    status("Нажато кнопок: ${r.clicked} (${r.texts})")
-                    // возможный диалог подтверждения — подтверждаем
-                    handler.postDelayed({
-                        try { webView.evaluateJavascript(JsRaiser.CONFIRM_JS, null) } catch (_: Throwable) { }
-                    }, 1200)
-                    handler.postDelayed({
-                        status("✅ Готово! Дата резюме обновлена (см. страницу ниже).")
-                        try { webView.reload() } catch (_: Throwable) { }
-                        Notifier.notify(
-                            this@MainActivity,
-                            "✅ HH: резюме подняты",
-                            "Нажато кнопок: ${r.clicked}",
-                            openApp = false
-                        )
-                        Telegram.send(
-                            this@MainActivity,
-                            "✅ HH: резюме подняты (кнопок: ${r.clicked}, через $source)"
-                        )
-                    }, 2500)
-                }
-                r.found > 0 ->
-                    status("⏳ Кнопок найдено: ${r.found}, но нажать не вышло (лимит 4 часа?)")
-                else -> {
-                    status(
-                        "⚠️ Кнопка «Поднять» не найдена. Если ниже форма входа — " +
-                            "войдите, клик произойдёт автоматически."
-                    )
-                    Telegram.send(this@MainActivity, "⚠️ HH: кнопка «Поднять» не найдена ($source)")
-                }
+    /** Поднимает ВСЕ доступные резюме на странице — по одному за раз. */
+    private fun runRaise() {
+        status("Ищу кнопки «Поднять в поиске»…")
+        RaiseDriver.runChain(webView) { total ->
+            if (total > 0) {
+                status("✅ Готово! Поднято резюме: $total")
+                Notifier.notify(
+                    this@MainActivity,
+                    "✅ HH: поднято резюме: $total",
+                    "Все доступные резюме подняты в поиске",
+                    openApp = false
+                )
+                handler.postDelayed({
+                    try { webView.reload() } catch (_: Throwable) { }
+                }, 1500)
+            } else {
+                status(
+                    "⚠️ Кнопка «Поднять» не найдена. Если ниже форма входа — войдите. " +
+                        "Если всё поднято — лимит 4 часа, подождите."
+                )
+                Notifier.notify(
+                    this@MainActivity,
+                    "HH: нечего поднимать",
+                    "Кнопка не найдена: нужен вход или лимит 4 часов",
+                    openApp = true
+                )
             }
         }
     }

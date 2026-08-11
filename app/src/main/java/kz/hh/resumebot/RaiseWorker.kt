@@ -20,8 +20,9 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
 /**
- * Фоновый воркер: раз в 4 часа открывает страницу «Мои резюме»
- * в скрытом WebView (с сохранённой сессией) и жмёт «Поднять».
+ * Фоновый воркер: раз в 4 часа открывает страницу с резюме
+ * в скрытом WebView (с сохранённой сессией) и жмёт «Поднять в поиске»
+ * для каждого доступного резюме.
  *
  * WorkManager сам восстанавливает расписание после перезагрузки телефона.
  * Если фоновый клик не удался (сессия истекла, прошивка убила WebView и т.п.),
@@ -53,20 +54,19 @@ class RaiseWorker(
             return Result.success()
         }
 
-        val r = try {
+        val total = try {
             withContext(Dispatchers.Main) { raiseViaHiddenWebView(url) }
         } catch (t: Throwable) {
-            RaiseResult(0, 0, "error")
+            -1
         }
 
-        return if (r.clicked > 0) {
+        return if (total > 0) {
             Notifier.notify(
                 appCtx,
-                "✅ HH: резюме подняты",
-                "Автоподнятие: нажато кнопок ${r.clicked}",
+                "✅ HH: поднято резюме: $total",
+                "Автоподнятие прошло успешно",
                 openApp = false
             )
-            Telegram.send(appCtx, "✅ HH: авто-поднятие, нажато кнопок: ${r.clicked}")
             Result.success()
         } else {
             Notifier.notify(
@@ -75,7 +75,6 @@ class RaiseWorker(
                 "Нажмите, чтобы открыть приложение — оно поднимет резюме",
                 openApp = true
             )
-            Telegram.send(appCtx, "⚠️ HH: фоновое поднятие не сработало (${r.texts})")
             Result.success()
         }
     }
@@ -85,15 +84,15 @@ class RaiseWorker(
      * поэтому doWork переключается на Dispatchers.Main, а здесь ждём
      * результат через корутину, не блокируя поток).
      */
-    private suspend fun raiseViaHiddenWebView(url: String): RaiseResult =
+    private suspend fun raiseViaHiddenWebView(url: String): Int =
         suspendCancellableCoroutine { cont ->
             val handler = Handler(Looper.getMainLooper())
             var wv: WebView? = null
 
-            fun finish(r: RaiseResult) {
+            fun finish(total: Int) {
                 handler.removeCallbacksAndMessages(null)
                 try { wv?.destroy() } catch (_: Throwable) { }
-                if (cont.isActive) cont.resume(r)
+                if (cont.isActive) cont.resume(total)
             }
 
             try {
@@ -105,28 +104,26 @@ class RaiseWorker(
                 view.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(v: WebView, u: String) {
                         when {
-                            u.contains("/applicant/resumes") -> v.postDelayed({
-                                v.evaluateJavascript(JsRaiser.CLICK_JS) { raw ->
-                                    val r = JsRaiser.parse(raw)
-                                    if (r.clicked > 0) {
-                                        v.evaluateJavascript(JsRaiser.CONFIRM_JS, null)
-                                    }
-                                    v.postDelayed({ finish(r) }, 1500)
+                            // Сначала проверяем логин: backUrl-параметр может
+                            // содержать "/applicant/", так что порядок важен
+                            u.contains("login") || u.contains("account") ->
+                                finish(0)
+
+                            u.contains("/applicant/") -> v.postDelayed({
+                                RaiseDriver.runChain(v) { total ->
+                                    v.postDelayed({ finish(total) }, 1000)
                                 }
                             }, 2500)
-
-                            u.contains("login") || u.contains("account") ->
-                                finish(RaiseResult(0, 0, "auth"))
                         }
                     }
                 }
                 view.loadUrl(url)
             } catch (t: Throwable) {
-                finish(RaiseResult(0, 0, "error"))
+                finish(-1)
             }
 
             // Страховой таймаут, чтобы воркер не висел вечно
-            handler.postDelayed({ finish(RaiseResult(0, 0, "timeout")) }, 70_000)
+            handler.postDelayed({ finish(-1) }, 80_000)
         }
 
     companion object {

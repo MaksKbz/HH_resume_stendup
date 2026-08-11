@@ -15,7 +15,8 @@ object Prefs {
     private const val KEY_TG_TOKEN = "tg_token"
     private const val KEY_TG_CHAT = "tg_chat"
 
-    const val DEFAULT_URL = "https://hh.kz/applicant/resumes"
+    // Список резюме с кнопками «Поднять в поиске» сейчас живёт на странице профиля
+    const val DEFAULT_URL = "https://hh.kz/applicant/profile/me"
 
     private fun sp(ctx: Context) =
         ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
