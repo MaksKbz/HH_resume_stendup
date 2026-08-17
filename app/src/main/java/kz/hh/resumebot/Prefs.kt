@@ -21,6 +21,7 @@ object Prefs {
     private const val KEY_LOG = "raise_log"
     private const val KEY_RECIPE = "raise_recipe"
     private const val KEY_WEB_UA = "web_ua"
+    private const val KEY_SCHED_VER = "schedule_ver"
 
     private const val MAX_LOG_LINES = 200
 
@@ -78,6 +79,14 @@ object Prefs {
     }
 
     fun webUa(ctx: Context): String = sp(ctx).getString(KEY_WEB_UA, "") ?: ""
+
+    // ---------- Версия расписания (одноразовая миграция периодики при обновлении) ----------
+
+    fun scheduleVersion(ctx: Context): Int = sp(ctx).getInt(KEY_SCHED_VER, 0)
+
+    fun setScheduleVersion(ctx: Context, v: Int) {
+        sp(ctx).edit().putInt(KEY_SCHED_VER, v).apply()
+    }
 
     // ---------- Текстовый лог (вся история, новые сверху) ----------
 

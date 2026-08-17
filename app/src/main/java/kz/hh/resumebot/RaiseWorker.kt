@@ -5,7 +5,9 @@ import android.webkit.CookieManager
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
@@ -24,7 +26,9 @@ import kotlin.coroutines.resume
  *  1. РЕПЛЕЙ — повтор захваченного при ручном поднятии HTTP-запроса.
  *     Без браузера, доли секунды, почти не ест батарею.
  *  2. ОВЕРЛЕЙ-WebView — только если реплей не вышел (запасной путь).
- *  3. Уведомление с призывом открыть приложение.
+ *  3. ДОБИВКА — если hh отклонил часть запросов (обычно «ещё нельзя
+ *     поднимать», резюме на замке), приходим добить их через ~18 минут.
+ *  4. Уведомление с призывом открыть приложение.
  *
  * Каждый запуск пишется в текстовый лог с точным результатом.
  */
@@ -37,6 +41,7 @@ class RaiseWorker(
         val appCtx = applicationContext
         val url = Prefs.url(appCtx)
         val source = inputData.getString(KEY_SOURCE) ?: "фон"
+        val retryNum = inputData.getInt(KEY_RETRY, 0)
         val isTest = source == "тест"
 
         Prefs.addLog(appCtx, source, "запуск воркера")
@@ -60,13 +65,22 @@ class RaiseWorker(
 
         var raised = 0
         var note = ""
+        var repOk = -1
+        var repTotal = -1
+        var repLocked = 0
+        var repReason = ""
 
         // --- ШАГ 1: реплей запроса (экономно) ---
         try {
             val rep = withContext(Dispatchers.IO) { ReplayRunner.run(appCtx, url) }
+            repOk = rep.ok
+            repTotal = rep.total
+            repLocked = rep.locked
+            repReason = rep.reason
             if (rep.ok > 0) {
                 raised = rep.ok
-                note = "поднято запросами: ${rep.ok}/${rep.total}"
+                note = "поднято запросами: ${rep.ok}/${rep.total}" +
+                    if (rep.locked > 0) " (замок по времени: ${rep.locked})" else ""
             } else {
                 note = "реплей: ${rep.reason}"
             }
@@ -104,6 +118,28 @@ class RaiseWorker(
         if (raised > 0) Prefs.setLastRaiseOk(appCtx)
         Prefs.addLog(appCtx, source, if (raised > 0) note else "не поднято: $note")
 
+        // --- ШАГ 3: «добивка» ---
+        // hh отклонил часть запросов (почти всегда — замок по времени у части
+        // резюме: их таймеры разошлись с расписанием воркера). Придём добить
+        // их через ~18 минут — само, без ручного вмешательства. Максимум
+        // MAX_RETRY добивок подряд, дальше ждём обычного цикла.
+        // В тест-режиме не нужно: воркер и так бегает каждые 15 минут.
+        if (!isTest && repTotal > 0 && repOk < repTotal &&
+            !repReason.contains("устарели")
+        ) {
+            if (retryNum < MAX_RETRY) {
+                scheduleRetry(appCtx, retryNum + 1)
+                Prefs.addLog(
+                    appCtx, source,
+                    "добью остальные через ~18 минут (попытка ${retryNum + 1} из $MAX_RETRY)"
+                )
+            } else {
+                Prefs.addLog(appCtx, source, "добивки кончились — следующий цикл по расписанию")
+            }
+        }
+        // Полный успех обычного цикла — висящая добивка больше не нужна
+        if (source == "фон" && repTotal > 0 && repOk == repTotal) cancelRetry(appCtx)
+
         when {
             isTest -> Notifier.notify(
                 appCtx,
@@ -130,11 +166,19 @@ class RaiseWorker(
     companion object {
         private const val WORK_NAME = "hh_resume_raise"
         private const val TEST_WORK_NAME = "hh_raise_test"
+        private const val RETRY_WORK_NAME = "hh_raise_retry"
         private const val KEY_SOURCE = "source"
+        private const val KEY_RETRY = "retry"
+        private const val MAX_RETRY = 2
 
-        /** Периодическое авто-поднятие каждые 4 часа. */
+        /**
+         * Периодическое авто-поднятие. Интервал 4 ч 10 мин — сознательно
+         * чуть БОЛЬШЕ лимита hh (4 ч): воркер, пришедший на секунды раньше
+         * снятия замка, получал отказы и оставлял часть резюме висеть
+         * (гонка таймеров, «поднято 3 из 5»).
+         */
         fun schedule(ctx: Context) {
-            val req = PeriodicWorkRequestBuilder<RaiseWorker>(4, TimeUnit.HOURS)
+            val req = PeriodicWorkRequestBuilder<RaiseWorker>(250, TimeUnit.MINUTES)
                 .setInputData(workDataOf(KEY_SOURCE to "фон"))
                 .setConstraints(networkConstraint())
                 .build()
@@ -158,6 +202,21 @@ class RaiseWorker(
 
         fun cancel(ctx: Context) {
             WorkManager.getInstance(ctx).cancelUniqueWork(WORK_NAME)
+        }
+
+        /** Одноразовая «добивка» через ~18 минут (после частичных отказов hh). */
+        private fun scheduleRetry(ctx: Context, retryNum: Int) {
+            val req = OneTimeWorkRequestBuilder<RaiseWorker>()
+                .setInitialDelay(18, TimeUnit.MINUTES)
+                .setInputData(workDataOf(KEY_SOURCE to "добивка", KEY_RETRY to retryNum))
+                .setConstraints(networkConstraint())
+                .build()
+            WorkManager.getInstance(ctx)
+                .enqueueUniqueWork(RETRY_WORK_NAME, ExistingWorkPolicy.REPLACE, req)
+        }
+
+        private fun cancelRetry(ctx: Context) {
+            WorkManager.getInstance(ctx).cancelUniqueWork(RETRY_WORK_NAME)
         }
 
         private fun networkConstraint() = Constraints.Builder()

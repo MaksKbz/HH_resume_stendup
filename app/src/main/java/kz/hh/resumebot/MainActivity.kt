@@ -55,6 +55,9 @@ class MainActivity : Activity() {
         /** Лимит hh: поднимать можно не чаще одного раза в 4 часа. */
         private const val RAISE_INTERVAL_MS = 4L * 60 * 60 * 1000
 
+        /** Версия фонового расписания; bump → при открытии пересоздаём периодику. */
+        private const val SCHEDULE_VERSION = 2
+
         const val URL_KZ = Prefs.URL_KZ
         const val URL_RU = Prefs.URL_RU
     }
@@ -64,6 +67,15 @@ class MainActivity : Activity() {
         buildUi()
         setupWebView()
         requestNotifPermission()
+
+        // Одноразовая миграция расписания: с v1.7 периодика 4 ч 10 мин
+        // (запас поверх лимита hh 4 ч, убирает гонку таймеров).
+        if (Prefs.auto(this) && Prefs.scheduleVersion(this) < SCHEDULE_VERSION) {
+            RaiseWorker.schedule(this)
+            Prefs.setScheduleVersion(this, SCHEDULE_VERSION)
+            Prefs.addLog(this, "приложение", "расписание обновлено: каждые 4 ч 10 мин")
+        }
+
         handleIntent(intent)
     }
 
@@ -348,10 +360,16 @@ class MainActivity : Activity() {
                         webView.evaluateJavascript(JsRaiser.READ_REQS_JS) { raw ->
                             val arr = JsRaiser.decode(raw)
                             if (arr.startsWith("[{")) {
-                                Prefs.setRecipe(this@MainActivity, arr)
+                                // чистим рецепт: только настоящие запросы поднятия,
+                                // без телеметрии hh и дублей
+                                val (recipe, raiseReqs) = ReplayRunner.filterRecipe(arr)
+                                Prefs.setRecipe(this@MainActivity, recipe)
                                 Prefs.addLog(
                                     this@MainActivity, "приложение",
-                                    "рецепт запроса сохранён (фон — без браузера)"
+                                    if (raiseReqs > 0)
+                                        "рецепт запроса сохранён (запросов поднятия: $raiseReqs)"
+                                    else
+                                        "рецепт запроса сохранён (без фильтра, как есть)"
                                 )
                             }
                             refreshLog()
