@@ -371,6 +371,14 @@ class MainActivity : Activity() {
                                     else
                                         "рецепт запроса сохранён (без фильтра, как есть)"
                                 )
+                                // адреса перехваченных запросов — диагностика рецепта
+                                val shapes = ReplayRunner.recipeShapes(recipe)
+                                if (shapes.isNotBlank()) {
+                                    Prefs.addLog(
+                                        this@MainActivity, "приложение",
+                                        "адреса рецепта: $shapes"
+                                    )
+                                }
                             }
                             refreshLog()
                         }

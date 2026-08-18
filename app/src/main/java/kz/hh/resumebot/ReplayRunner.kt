@@ -4,6 +4,7 @@ import android.content.Context
 import android.webkit.CookieManager
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
@@ -13,13 +14,14 @@ import java.util.Locale
  * БЕЗ браузера. Самый бережливый к батарее способ: несколько
  * маленьких запросов вместо запуска Chromium.
  *
- * v1.7:
- *  — перед реплеем делаем лёгкий GET страницы кабинета: сервер выдаёт
- *    СВЕЖИЕ куки и свежий _xsrf (hh ротирует его, за день протухает);
- *  — свежий _xsrf подставляем и в заголовки, и в тело, и в query;
- *  — HTTP 429 («ещё нельзя поднимать») считаем отдельно: это замок
- *    по времени, а не сбой — воркер планирует «добивку» позже;
- *  — в отчёт при ошибках прикладываем кусочек ответа сервера.
+ * v1.8 (диагностика):
+ *  — hh отвечает HTTP 200 даже когда НЕ поднимает (отказ в тексте
+ *    ответа). Поэтому: читаем тело каждого ответа, «успех» с текстом
+ *    отказа считаем 2xx-ОТКАЗОМ, а не успехом;
+ *  — в лог пишем детали по каждому запросу: адрес → код → фрагмент
+ *    ответа. По ним станет ясно, какой запрос — настоящее поднятие,
+ *    а какой — мусор, и что hh пишет при отказе;
+ *  — лёгкий GET страницы перед реплеем (свежие куки/_xsrf) — как в v1.7.
  *
  * Вызывать с фонового потока (Dispatchers.IO).
  */
@@ -29,7 +31,9 @@ object ReplayRunner {
         val ok: Int,
         val total: Int,
         val reason: String,
-        val locked: Int = 0 // сколько запросов hh отклонил по времени (HTTP 429)
+        val locked: Int = 0,       // HTTP 429
+        val bodyRejected: Int = 0, // HTTP 2xx, но в тексте ответа — отказ
+        val details: String = ""   // «адрес→код «фрагмент»; …» по каждому запросу
     )
 
     /** Адреса телеметрии/логов — к поднятию отношения не имеют. */
@@ -38,20 +42,18 @@ object ReplayRunner {
             "clck|yandex|google-analytics|impression|pixel|shifter|webvisor|metrika"
     )
 
+    /** Маркеры отказа в теле «успешного» (HTTP 200) ответа. */
+    private val ERRWORDS = Regex(
+        "(?i)(ошиб|нельз|слишком рано|рано подня|уже поднят|too_early|too often|" +
+            "\"error\"\\s*:\\s*[{\\\"]|\"errors\"\\s*:\\s*\\[\\s*\\{)"
+    )
+
     /**
      * Чистит перехваченный трафик: оставляет только настоящие запросы
-     * поднятия. Сниффер на странице записывает ВСЕ POST'ы подряд —
-     * вместе со служебной телеметрией hh, которая всегда отвечает 200
-     * и из-за этого искажает счётчик успеха («19/19» при 5 резюме).
-     * Признак поднятия: адрес содержит resum/raise ИЛИ в заголовках
-     * есть xsrf-токен (hh им подписывает настоящие действия),
-     * при этом адрес не похож на телеметрию. Дубли
-     * (адрес+тело) выкидываем.
-     *
-     * Возвращает (json рецепта, сколько в нём запросов поднятия).
-     * Если фильтр ничего не нашёл (hh вдруг сменил адреса) — возвращаем
-     * исходный рецепт как есть и count = -1: лучше «грязный» рецепт,
-     * чем совсем никакого.
+     * поднятия. Признак: адрес содержит resum/raise ИЛИ в заголовках
+     * есть xsrf-токен, при этом адрес не похож на телеметрию.
+     * Дубли (адрес+тело) выкидываем. Если фильтр ничего не нашёл —
+     * возвращаем исходный рецепт как есть (count = -1).
      */
     fun filterRecipe(rawJson: String): Pair<String, Int> {
         val src = try {
@@ -78,6 +80,37 @@ object ReplayRunner {
             count++
         }
         return if (count == 0) Pair(rawJson, -1) else Pair(out.toString(), count)
+    }
+
+    /** Адреса рецепта без домена — для лога (увидеть, что реально перехвачено). */
+    fun recipeShapes(rawJson: String): String {
+        return try {
+            val arr = JSONArray(rawJson)
+            val sb = StringBuilder()
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                var u = o.optString("u").replace(Regex("^https?://[^/]+"), "")
+                if (u.length > 60) u = u.take(60) + "…"
+                if (sb.isNotEmpty()) sb.append("; ")
+                sb.append(u)
+                if (sb.length > 220) { sb.append(" …"); break }
+            }
+            sb.toString()
+        } catch (t: Throwable) { "" }
+    }
+
+    private fun readCap(stream: InputStream?, cap: Int): String {
+        if (stream == null) return ""
+        return try {
+            val buf = ByteArray(cap)
+            var total = 0
+            while (total < cap) {
+                val r = stream.read(buf, total, cap - total)
+                if (r < 0) break
+                total += r
+            }
+            String(buf, 0, total, Charsets.UTF_8)
+        } catch (_: Throwable) { "" }
     }
 
     fun run(ctx: Context, pageUrl: String): Outcome {
@@ -149,8 +182,16 @@ object ReplayRunner {
 
         var ok = 0
         var locked = 0
+        var bodyRejected = 0
         var failReason = ""
-        var failSnippet = ""
+        val detList = ArrayList<String>()
+
+        fun addDetail(short: String, code: Int, snip: String) {
+            if (detList.size >= 7) return
+            detList.add(
+                short + "→" + code + if (snip.isNotBlank()) " «" + snip.take(45) + "»" else ""
+            )
+        }
 
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
@@ -171,6 +212,7 @@ object ReplayRunner {
                     .replace(Regex("_xsrf=[^&]*"), "_xsrf=$xsrf")
                     .replace(Regex("\"xsrf\"\\s*:\\s*\"[^\"]*\""), "\"xsrf\":\"$xsrf\"")
             }
+            val short = reqUrl.removePrefix(base).let { if (it.length > 70) it.take(70) + "…" else it }
 
             try {
                 val conn = URL(reqUrl).openConnection() as HttpURLConnection
@@ -206,61 +248,80 @@ object ReplayRunner {
                 mergeSetCookie(conn)
                 xsrf = jar["_xsrf"] ?: xsrf
 
+                // читаем тело ответа (немного) — hh прячет отказ внутри «200 OK»
+                val respText = readCap(
+                    if (code in 200..299) conn.inputStream
+                    else (conn.errorStream ?: conn.inputStream),
+                    600
+                ).replace(Regex("\\s+"), " ").trim()
+
                 when {
-                    code in 200..299 -> ok++
+                    code in 200..299 -> {
+                        if (ERRWORDS.containsMatchIn(respText)) {
+                            bodyRejected++
+                            if (failReason.isBlank()) failReason = "2xx с отказом в тексте"
+                            addDetail(short, code, respText)
+                        } else {
+                            ok++
+                            addDetail(short, code, respText.take(45))
+                        }
+                    }
                     code == 429 -> { // «ещё нельзя поднимать» — замок по времени
                         locked++
                         failReason = "замок по времени (429)"
+                        addDetail(short, code, respText.take(45))
                     }
                     code == 401 || code == 403 -> {
+                        addDetail(short, code, respText.take(45))
                         conn.disconnect()
                         return Outcome(
                             ok, arr.length(),
                             "сессия/доступ устарели (HTTP $code) — откройте приложение и войдите",
-                            locked
+                            locked, bodyRejected, joinDetails(detList, arr.length())
                         )
                     }
                     else -> {
                         failReason = "HTTP $code"
-                        if (failSnippet.isBlank()) {
-                            failSnippet = try {
-                                val stream = conn.errorStream ?: conn.inputStream
-                                stream?.readBytes()?.take(160)?.toByteArray()
-                                    ?.toString(Charsets.UTF_8)
-                                    ?.replace(Regex("\\s+"), " ")
-                                    ?.take(120) ?: ""
-                            } catch (_: Throwable) { "" }
-                        }
+                        addDetail(short, code, respText.take(45))
                     }
                 }
                 conn.disconnect()
             } catch (t: Throwable) {
                 failReason = "сеть: ${t.javaClass.simpleName}"
+                addDetail(short, -1, t.javaClass.simpleName)
             }
 
             Thread.sleep(400) // пауза между запросами
         }
 
-        val snippet = if (failSnippet.isBlank()) "" else ": $failSnippet"
+        val details = joinDetails(detList, arr.length())
         return if (ok > 0) {
             val extra = mutableListOf<String>()
             if (locked > 0) extra.add("замок по времени: $locked")
-            if (failReason.isNotBlank() && failReason != "замок по времени (429)") {
-                extra.add(failReason + snippet)
-            }
+            if (bodyRejected > 0) extra.add("2xx-отказов: $bodyRejected")
+            if (failReason.isNotBlank() && failReason != "замок по времени (429)" &&
+                failReason != "2xx с отказом в тексте"
+            ) extra.add(failReason)
             Outcome(
                 ok, arr.length(),
                 if (extra.isEmpty()) "ок" else "частично: " + extra.joinToString("; "),
-                locked
+                locked, bodyRejected, details
             )
         } else {
             val reason = when {
+                bodyRejected > 0 -> "hh ответил отказом (см. строку «детали»)"
                 locked > 0 && failReason == "замок по времени (429)" ->
                     "все ещё на замке по времени (429 ×$locked) — hh разрешит позже"
-                failReason.isNotBlank() -> failReason + snippet
+                failReason.isNotBlank() -> failReason
                 else -> "ничего не отправлено"
             }
-            Outcome(0, arr.length(), reason, locked)
+            Outcome(0, arr.length(), reason, locked, bodyRejected, details)
         }
+    }
+
+    private fun joinDetails(list: List<String>, total: Int): String {
+        if (list.isEmpty()) return ""
+        val more = if (total > list.size) "; …ещё ${total - list.size}" else ""
+        return list.joinToString("; ") + more
     }
 }

@@ -68,6 +68,8 @@ class RaiseWorker(
         var repOk = -1
         var repTotal = -1
         var repLocked = 0
+        var repBodyRej = 0
+        var repDetails = ""
         var repReason = ""
 
         // --- ШАГ 1: реплей запроса (экономно) ---
@@ -76,11 +78,16 @@ class RaiseWorker(
             repOk = rep.ok
             repTotal = rep.total
             repLocked = rep.locked
+            repBodyRej = rep.bodyRejected
+            repDetails = rep.details
             repReason = rep.reason
             if (rep.ok > 0) {
                 raised = rep.ok
-                note = "поднято запросами: ${rep.ok}/${rep.total}" +
-                    if (rep.locked > 0) " (замок по времени: ${rep.locked})" else ""
+                note = buildString {
+                    append("поднято запросами: ${rep.ok}/${rep.total}")
+                    if (rep.locked > 0) append(" (замок по времени: ${rep.locked})")
+                    if (rep.bodyRejected > 0) append(" (2xx-отказов: ${rep.bodyRejected})")
+                }
             } else {
                 note = "реплей: ${rep.reason}"
             }
@@ -117,6 +124,8 @@ class RaiseWorker(
 
         if (raised > 0) Prefs.setLastRaiseOk(appCtx)
         Prefs.addLog(appCtx, source, if (raised > 0) note else "не поднято: $note")
+        // диагностика: что ответил hh по каждому запросу (строкой выше результата)
+        if (repDetails.isNotBlank()) Prefs.addLog(appCtx, source, "детали: $repDetails")
 
         // --- ШАГ 3: «добивка» ---
         // hh отклонил часть запросов (почти всегда — замок по времени у части
