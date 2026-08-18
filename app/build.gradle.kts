@@ -11,8 +11,8 @@ android {
         applicationId = "kz.hh.resumebot"
         minSdk = 24
         targetSdk = 34
-        versionCode = 9
-        versionName = "1.7.1"
+        versionCode = 10
+        versionName = "1.8"
     }
 
     // Фиксированный ключ: все сборки подписываются одинаково,
