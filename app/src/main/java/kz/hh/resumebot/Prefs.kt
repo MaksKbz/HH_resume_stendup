@@ -22,6 +22,7 @@ object Prefs {
     private const val KEY_RECIPE = "raise_recipe"
     private const val KEY_WEB_UA = "web_ua"
     private const val KEY_SCHED_VER = "schedule_ver"
+    private const val KEY_RESUME_IDS = "resume_ids"
 
     private const val MAX_LOG_LINES = 200
 
@@ -86,6 +87,38 @@ object Prefs {
 
     fun setScheduleVersion(ctx: Context, v: Int) {
         sp(ctx).edit().putInt(KEY_SCHED_VER, v).apply()
+    }
+
+    // ---------- Id резюме (собираются со страницы; фон шлёт touch для каждого) ----------
+
+    fun resumeIds(ctx: Context): String = sp(ctx).getString(KEY_RESUME_IDS, "[]") ?: "[]"
+
+    /**
+     * Объединяет новый список id с сохранённым. Возвращает, сколько НОВЫХ id добавлено.
+     */
+    fun mergeResumeIds(ctx: Context, newJson: String): Int {
+        return try {
+            val set = LinkedHashSet<String>()
+            val cur = org.json.JSONArray(resumeIds(ctx))
+            for (i in 0 until cur.length()) {
+                val s = cur.optString(i)
+                if (s.isNotBlank()) set.add(s)
+            }
+            val before = set.size
+            val n = org.json.JSONArray(newJson)
+            for (i in 0 until n.length()) {
+                val s = n.optString(i)
+                if (s.isNotBlank()) set.add(s)
+            }
+            if (set.size != before) {
+                val out = org.json.JSONArray()
+                for (s in set) out.put(s)
+                sp(ctx).edit().putString(KEY_RESUME_IDS, out.toString()).apply()
+            }
+            set.size - before
+        } catch (t: Throwable) {
+            0
+        }
     }
 
     // ---------- Текстовый лог (вся история, новые сверху) ----------

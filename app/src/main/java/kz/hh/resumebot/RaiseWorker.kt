@@ -69,6 +69,7 @@ class RaiseWorker(
         var repTotal = -1
         var repLocked = 0
         var repBodyRej = 0
+        var repCaptcha = false
         var repDetails = ""
         var repReason = ""
 
@@ -79,6 +80,7 @@ class RaiseWorker(
             repTotal = rep.total
             repLocked = rep.locked
             repBodyRej = rep.bodyRejected
+            repCaptcha = rep.captcha
             repDetails = rep.details
             repReason = rep.reason
             if (rep.ok > 0) {
@@ -133,7 +135,8 @@ class RaiseWorker(
         // их через ~18 минут — само, без ручного вмешательства. Максимум
         // MAX_RETRY добивок подряд, дальше ждём обычного цикла.
         // В тест-режиме не нужно: воркер и так бегает каждые 15 минут.
-        if (!isTest && repTotal > 0 && repOk < repTotal &&
+        // При капче не дёргаемся: поможет только вход через браузер приложения.
+        if (!isTest && !repCaptcha && repTotal > 0 && repOk < repTotal &&
             !repReason.contains("устарели")
         ) {
             if (retryNum < MAX_RETRY) {
@@ -161,6 +164,12 @@ class RaiseWorker(
                 "✅ HH: поднято резюме: $raised",
                 note,
                 openApp = false
+            )
+            repCaptcha -> Notifier.notify(
+                appCtx,
+                "🤖 HH: капча",
+                "Откройте приложение и нажмите «Поднять сейчас» — капча пройдёт в браузере",
+                openApp = true
             )
             else -> Notifier.notify(
                 appCtx,

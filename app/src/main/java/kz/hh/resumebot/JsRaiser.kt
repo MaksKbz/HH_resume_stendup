@@ -170,6 +170,17 @@ object JsRaiser {
         "(function(){try{var r=(window.__reqs||[]).filter(function(x){return x.m==='POST'});" +
             "return JSON.stringify(r)}catch(e){return '[]'}})()"
 
+    /**
+     * Собрать id ВСЕХ резюме на странице (из ссылок карточек /resume/<hash>).
+     * Фоновый режим шлёт запрос поднятия для каждого id — независимо от того,
+     * какие именно резюме удалось перехватить при записи рецепта.
+     */
+    val READ_RESUME_IDS_JS: String =
+        "(function(){try{var out={};var ls=document.querySelectorAll('a[href*=\"/resume/\"]');" +
+            "for(var i=0;i<ls.length;i++){var m=(ls[i].getAttribute('href')||'')" +
+            ".match(/\\/resume\\/([0-9a-fA-F]{20,})/);if(m)out[m[1]]=1;}" +
+            "var k=[];for(var x in out)k.push(x);return JSON.stringify(k)}catch(e){return '[]'}})()"
+
     /** evaluateJavascript возвращает JSON-строку в кавычках — снимаем кавычки/эскейпы. */
     fun decode(raw: String?): String {
         if (raw.isNullOrBlank() || raw == "null") return ""

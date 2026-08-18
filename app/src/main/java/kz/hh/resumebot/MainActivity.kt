@@ -310,6 +310,23 @@ class MainActivity : Activity() {
                 if (url.contains("/applicant/") && !isLoginPage) {
                     // Вешаем сниффер ДО кликов — так узнаём точный запрос hh
                     try { view.evaluateJavascript(JsRaiser.CAPTURE_JS, null) } catch (_: Throwable) { }
+                    // Собираем id ВСЕХ резюме на странице — фон будет поднимать каждое,
+                    // а не только те, что попали в перехват при записи рецепта
+                    try {
+                        view.evaluateJavascript(JsRaiser.READ_RESUME_IDS_JS) { rawIds ->
+                            val dec = JsRaiser.decode(rawIds)
+                            if (dec.startsWith("[\"")) {
+                                val added = Prefs.mergeResumeIds(this@MainActivity, dec)
+                                if (added > 0) {
+                                    Prefs.addLog(
+                                        this@MainActivity, "приложение",
+                                        "список резюме обновлён (новых id: +$added)"
+                                    )
+                                    refreshLog()
+                                }
+                            }
+                        }
+                    } catch (_: Throwable) { }
                 }
 
                 // Кнопки поднятия есть на страницах личного кабинета
