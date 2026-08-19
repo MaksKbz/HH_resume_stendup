@@ -174,6 +174,7 @@ object JsRaiser {
      * Собрать id ВСЕХ резюме на странице (из ссылок карточек /resume/<hash>).
      * Фоновый режим шлёт запрос поднятия для каждого id — независимо от того,
      * какие именно резюме удалось перехватить при записи рецепта.
+     * (Страница /applicant/profile/me показывает только свои резюме.)
      */
     val READ_RESUME_IDS_JS: String =
         "(function(){try{var out={};var ls=document.querySelectorAll('a[href*=\"/resume/\"]');" +

@@ -136,7 +136,11 @@ class RaiseWorker(
         // MAX_RETRY добивок подряд, дальше ждём обычного цикла.
         // В тест-режиме не нужно: воркер и так бегает каждые 15 минут.
         // При капче не дёргаемся: поможет только вход через браузер приложения.
-        if (!isTest && !repCaptcha && repTotal > 0 && repOk < repTotal &&
+        // Если ВСЕ ответы — «ещё нельзя» (замок 4 ч), добивка бесполезна
+        // и лишь кормит антибот: ждём обычного цикла. Добивка нужна, когда
+        // часть резюме поднялась, а часть нет — их замок вот-вот спадёт.
+        val allLocked = repOk == 0 && repLocked >= repTotal && repTotal > 0
+        if (!isTest && !repCaptcha && !allLocked && repTotal > 0 && repOk < repTotal &&
             !repReason.contains("устарели")
         ) {
             if (retryNum < MAX_RETRY) {

@@ -93,6 +93,12 @@ object Prefs {
 
     fun resumeIds(ctx: Context): String = sp(ctx).getString(KEY_RESUME_IDS, "[]") ?: "[]"
 
+    fun resumeIdsCount(ctx: Context): Int = try {
+        org.json.JSONArray(resumeIds(ctx)).length()
+    } catch (t: Throwable) {
+        0
+    }
+
     /**
      * Объединяет новый список id с сохранённым. Возвращает, сколько НОВЫХ id добавлено.
      */
@@ -118,6 +124,40 @@ object Prefs {
             set.size - before
         } catch (t: Throwable) {
             0
+        }
+    }
+
+    /**
+     * Заменяет список id резюме снимком со страницы профиля:
+     * новые резюме добавляются, удалённые/скрытые с hh — выпадают,
+     * список всегда отражает реальность. Пустой снимок игнорируем
+     * (страница могла не дорисоваться) — старый список не трогаем.
+     * Возвращает (сколько id стало, изменился ли список).
+     */
+    fun setResumeIdsFromPage(ctx: Context, newJson: String): Pair<Int, Boolean> {
+        return try {
+            val fresh = LinkedHashSet<String>()
+            val n = org.json.JSONArray(newJson)
+            for (i in 0 until n.length()) {
+                val s = n.optString(i)
+                if (s.isNotBlank()) fresh.add(s)
+            }
+            if (fresh.isEmpty()) return Pair(resumeIdsCount(ctx), false)
+
+            val old = LinkedHashSet<String>()
+            val cur = org.json.JSONArray(resumeIds(ctx))
+            for (i in 0 until cur.length()) {
+                val s = cur.optString(i)
+                if (s.isNotBlank()) old.add(s)
+            }
+            if (fresh == old) return Pair(old.size, false)
+
+            val out = org.json.JSONArray()
+            for (s in fresh) out.put(s)
+            sp(ctx).edit().putString(KEY_RESUME_IDS, out.toString()).apply()
+            Pair(fresh.size, true)
+        } catch (t: Throwable) {
+            Pair(resumeIdsCount(ctx), false)
         }
     }
 

@@ -41,8 +41,31 @@ object ReplayRunner {
     /** Адреса телеметрии/логов — к поднятию отношения не имеют. */
     private val TELEMETRY = Regex(
         "metric|analytic|counter|valet|sentry|beacon|telemetry|tracking|/log|" +
-            "clck|yandex|google-analytics|impression|pixel|shifter|webvisor|metrika"
+            "clck|yandex|impression|pixel|shifter|webvisor|metrika|" +
+            "google|gstatic|doubleclick"
     )
+
+    /**
+     * Извлекает id резюме из тел перехваченных touch-запросов.
+     * Это гарантированно СВОИ резюме (их поднимали в браузере приложения),
+     * в отличие от парсинга страницы, который цепляет и чужие карточки.
+     */
+    fun mineIdsFromRecipe(recipeJson: String): List<String> {
+        return try {
+            val arr = JSONArray(recipeJson)
+            val out = LinkedHashSet<String>()
+            val hex = Regex("[0-9a-fA-F]{20,}")
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                if (!o.optString("u").contains(TOUCH_MARK)) continue
+                val b = if (o.isNull("b")) "" else o.optString("b")
+                for (m in hex.findAll(b)) out.add(m.value)
+            }
+            out.toList()
+        } catch (t: Throwable) {
+            emptyList()
+        }
+    }
 
     /** Маркеры отказа в теле «успешного» (HTTP 200) ответа. */
     private val ERRWORDS = Regex(

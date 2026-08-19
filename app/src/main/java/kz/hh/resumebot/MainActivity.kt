@@ -310,17 +310,18 @@ class MainActivity : Activity() {
                 if (url.contains("/applicant/") && !isLoginPage) {
                     // Вешаем сниффер ДО кликов — так узнаём точный запрос hh
                     try { view.evaluateJavascript(JsRaiser.CAPTURE_JS, null) } catch (_: Throwable) { }
-                    // Собираем id ВСЕХ резюме на странице — фон будет поднимать каждое,
-                    // а не только те, что попали в перехват при записи рецепта
+                    // Собираем id всех своих резюме со страницы — список в фоне
+                    // всегда зеркалит реальность (добавил/удалил резюме → ок)
                     try {
                         view.evaluateJavascript(JsRaiser.READ_RESUME_IDS_JS) { rawIds ->
                             val dec = JsRaiser.decode(rawIds)
                             if (dec.startsWith("[\"")) {
-                                val added = Prefs.mergeResumeIds(this@MainActivity, dec)
-                                if (added > 0) {
+                                val (total, changed) =
+                                    Prefs.setResumeIdsFromPage(this@MainActivity, dec)
+                                if (changed) {
                                     Prefs.addLog(
                                         this@MainActivity, "приложение",
-                                        "список резюме обновлён (новых id: +$added)"
+                                        "резюме на странице: $total шт — список id обновлён"
                                     )
                                     refreshLog()
                                 }
@@ -394,6 +395,19 @@ class MainActivity : Activity() {
                                     Prefs.addLog(
                                         this@MainActivity, "приложение",
                                         "адреса рецепта: $shapes"
+                                    )
+                                }
+                                // Вытаскиваем id резюме из перехваченных touch-запросов —
+                                // только СВОИ (страничный парсер ловил и чужие, убрали).
+                                val mined = ReplayRunner.mineIdsFromRecipe(recipe)
+                                if (mined.isNotEmpty()) {
+                                    val ja = org.json.JSONArray()
+                                    mined.forEach { ja.put(it) }
+                                    Prefs.mergeResumeIds(this@MainActivity, ja.toString())
+                                    Prefs.addLog(
+                                        this@MainActivity, "приложение",
+                                        "известно id резюме: " +
+                                            Prefs.resumeIdsCount(this@MainActivity)
                                     )
                                 }
                             }
